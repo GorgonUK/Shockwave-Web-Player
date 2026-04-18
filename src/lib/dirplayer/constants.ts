@@ -6,6 +6,9 @@
  * - `local`: a locally rebuilt / patched bundle copied from `vendor/dirplayer-rs`
  *
  * Switch between them with `VITE_DIRPLAYER_RUNTIME_SOURCE=upstream|local`.
+ *
+ * Default is `local` because it includes compatibility fixes (e.g. `getPos`)
+ * needed by some shipped games.
  */
 export const DIRPLAYER_RUNTIME_SOURCES = {
   upstream: '/dirplayer/dirplayer-polyfill.js',
@@ -16,7 +19,8 @@ export type DirPlayerRuntimeSource = keyof typeof DIRPLAYER_RUNTIME_SOURCES;
 
 function resolveRuntimeSource(): DirPlayerRuntimeSource {
   const requested = import.meta.env.VITE_DIRPLAYER_RUNTIME_SOURCE?.trim().toLowerCase();
-  return requested === 'local' ? 'local' : 'upstream';
+  if (requested === 'upstream') return 'upstream';
+  return 'local';
 }
 
 export const DIRPLAYER_RUNTIME_SOURCE = resolveRuntimeSource();

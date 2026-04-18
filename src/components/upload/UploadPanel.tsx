@@ -47,6 +47,8 @@ export function UploadPanel({
   }, []);
 
   const hasAny = Boolean(assets.movie || assets.cast);
+  const isIos = /iPad|iPhone|iPod/.test(globalThis.navigator?.userAgent ?? '');
+  const inputAcceptAttr = isIos ? undefined : ACCEPT_ATTR;
 
   return (
     <Card>
@@ -87,7 +89,7 @@ export function UploadPanel({
           <input
             ref={inputRef}
             type="file"
-            accept={ACCEPT_ATTR}
+            accept={inputAcceptAttr}
             multiple
             className="sr-only"
             onChange={(e) => {
