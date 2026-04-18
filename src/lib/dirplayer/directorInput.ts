@@ -3,6 +3,8 @@
  * `#stage_canvas_container`; pointer events use the same element for coordinates).
  */
 
+import { findDirectorStageElement } from './stageElement';
+
 const TRACE_PARAM = 'dirplayerTraceInput';
 const TRACE_LS = 'dirplayerTraceInput';
 
@@ -25,7 +27,7 @@ export function isDirectorInputTraceEnabled(): boolean {
 /** Focus the polyfill stage so `onKeyDown` on `#stage_canvas_container` receives keys. */
 export function focusDirectorStage(mountRoot: HTMLElement | null | undefined): void {
   if (!mountRoot) return;
-  const el = mountRoot.querySelector('#stage_canvas_container');
+  const el = findDirectorStageElement(mountRoot);
   if (!(el instanceof HTMLElement)) return;
   try {
     if (!el.hasAttribute('tabindex')) {
@@ -50,7 +52,7 @@ export function attachDirectorInputTrace(mountRoot: HTMLElement): () => void {
 
   const onPointer = (e: PointerEvent) => {
     if (!mountRoot.contains(e.target as Node)) return;
-    const stage = mountRoot.querySelector('#stage_canvas_container');
+    const stage = findDirectorStageElement(mountRoot);
     const tag = e.target instanceof HTMLElement ? e.target.tagName : '?';
     // eslint-disable-next-line no-console
     console.info(prefix, e.type, {
@@ -73,7 +75,7 @@ export function attachDirectorInputTrace(mountRoot: HTMLElement): () => void {
 
   const onKeyDoc = (e: KeyboardEvent) => {
     if (e.type !== 'keydown') return;
-    const stage = mountRoot.querySelector('#stage_canvas_container');
+    const stage = findDirectorStageElement(mountRoot);
     const onStage = stage instanceof HTMLElement && document.activeElement === stage;
     // eslint-disable-next-line no-console
     console.info(prefix, 'keydown', {
