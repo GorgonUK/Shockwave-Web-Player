@@ -195,6 +195,13 @@ export async function ensureWasmSafeBlobSession(
     await putInBlobCache(castUrl, cast.file, 'application/x-director');
     await assertCachedUrlMatchesFile(castUrl, cast.file, 'cast');
     cachedHttpUrls.push(castUrl);
+    // Games often request lowercase paths (e.g. sound.cct); Windows uploads may differ in casing.
+    const lower = castLogicalName.toLowerCase();
+    if (lower !== castLogicalName) {
+      const aliasUrl = cacheableHttpUrl(id, lower);
+      await putInBlobCache(aliasUrl, cast.file, 'application/x-director');
+      cachedHttpUrls.push(aliasUrl);
+    }
   }
 
   return { movieHttpUrl: movieUrl, cachedHttpUrls };

@@ -3,6 +3,72 @@ import { ensurePolyfillLoaded } from './dirPlayerLoader';
 import type { DirPlayerRuntime, MountConfig, MountedInstance } from './types';
 
 /**
+ * WASM maps pointer coords using `player.stage_size` (must match the element that
+ * receives events — `#stage_canvas_container`). The polyfill also calls
+ * `set_stage_size` from useMeasure on the outer `.container`, which can differ by
+ * a few pixels and breaks hit-testing. We sync from the real stage element.
+ */
+function attachStageSizeSync(host: HTMLElement, runtime: DirPlayerRuntime | null): () => void {
+  let ro: ResizeObserver | null = null;
+  let mo: MutationObserver | null = null;
+  let observed: Element | null = null;
+
+  const sync = () => {
+    const el = host.querySelector('#stage_canvas_container');
+    if (!(el instanceof HTMLElement)) return;
+    const w = Math.round(el.clientWidth);
+    const h = Math.round(el.clientHeight);
+    if (w < 1 || h < 1) return;
+    try {
+      runtime?.set_stage_size?.(w, h);
+      runtime?.setStageSize?.(w, h);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const ensureObservingStage = () => {
+    const el = host.querySelector('#stage_canvas_container');
+    if (!el) {
+      return;
+    }
+    if (el === observed) {
+      sync();
+      return;
+    }
+    if (!ro) {
+      ro = new ResizeObserver(() => sync());
+    } else {
+      ro.disconnect();
+    }
+    ro.observe(el);
+    observed = el;
+    sync();
+  };
+
+  mo = new MutationObserver(ensureObservingStage);
+  mo.observe(host, { childList: true, subtree: true });
+
+  requestAnimationFrame(ensureObservingStage);
+  queueMicrotask(ensureObservingStage);
+  const t = window.setTimeout(ensureObservingStage, 120);
+  /** Polyfill Stage may overwrite stage_size from useMeasure on the outer `.container` (≠ #stage_canvas_container). */
+  const iv = window.setInterval(sync, 500);
+  const ivDone = window.setTimeout(() => window.clearInterval(iv), 20_000);
+
+  return () => {
+    window.clearTimeout(t);
+    window.clearTimeout(ivDone);
+    window.clearInterval(iv);
+    mo?.disconnect();
+    mo = null;
+    ro?.disconnect();
+    ro = null;
+    observed = null;
+  };
+}
+
+/**
  * Insert a legacy Shockwave `<object>` so the polyfill's `Ga()` / mutation
  * observer picks it up (`UM` → `JM`).
  *
@@ -113,15 +179,11 @@ export async function mountDirPlayer(config: MountConfig): Promise<MountedInstan
   }
 
   // ---------------------------------------------------------------------
-  // TODO(DirPlayer) #3 — wire stage size + input bridges (if needed)
+  // Stage size for pointer→movie coordinate mapping (see attachStageSizeSync).
   // ---------------------------------------------------------------------
-  // Some bundles auto-attach mouse/keyboard listeners; others expect the
-  // host page to forward events via `mouse_down(x, y)`, `key_down(code)`,
-  // etc. Confirm and wire here. Stage size can also be applied:
+  let detachStageSize: (() => void) | undefined;
   try {
-    const stage = config.stage ?? DEFAULT_STAGE;
-    runtime?.set_stage_size?.(stage.width, stage.height);
-    runtime?.setStageSize?.(stage.width, stage.height);
+    detachStageSize = attachStageSizeSync(host, runtime);
   } catch (err) {
     config.onError?.(err);
   }
@@ -130,6 +192,11 @@ export async function mountDirPlayer(config: MountConfig): Promise<MountedInstan
     host,
     runtimeKey,
     destroy: async () => {
+      try {
+        detachStageSize?.();
+      } catch {
+        /* ignore */
+      }
       try {
         runtime?.destroy?.();
       } catch {

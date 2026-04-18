@@ -41,6 +41,10 @@ import type { PolyfillStatus } from '@/types/diagnostics';
 import type { AssetSlots } from '@/types/assets';
 import { useDiagnostics } from '@/hooks/useDiagnostics';
 import { describeError, toErrorMessage } from '@/lib/utils/errors';
+import {
+  attachDirectorInputTrace,
+  focusDirectorStage,
+} from '@/lib/dirplayer/directorInput';
 
 interface UseDirPlayerOptions {
   containerRef: React.RefObject<HTMLElement | null>;
@@ -74,6 +78,7 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
   const mountedRef = useRef<MountedInstance | null>(null);
   /** Synthetic blob-session URLs (movie + optional cast) — revoke all on teardown. */
   const syntheticBlobUrlsRef = useRef<string[] | null>(null);
+  const inputTraceDetachRef = useRef<(() => void) | null>(null);
   /** Context for DirPlayer script errors (set when dcr URL is resolved in load()). */
   const playbackContextRef = useRef<{
     movieFileName?: string;
@@ -110,6 +115,13 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
       await revokeWasmSafeBlobUrls(syntheticBlobUrlsRef.current);
       syntheticBlobUrlsRef.current = null;
     }
+    try {
+      inputTraceDetachRef.current?.();
+    } catch {
+      /* ignore */
+    }
+    inputTraceDetachRef.current = null;
+
     const inst = mountedRef.current;
     mountedRef.current = null;
     if (inst) {
@@ -211,6 +223,14 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
       mountedRef.current = instance;
       setRuntimeKey(instance.runtimeKey);
 
+      inputTraceDetachRef.current?.();
+      inputTraceDetachRef.current = attachDirectorInputTrace(instance.host);
+      focusDirectorStage(instance.host);
+      requestAnimationFrame(() => focusDirectorStage(instance.host));
+      for (const ms of [50, 200, 600]) {
+        window.setTimeout(() => focusDirectorStage(instance.host), ms);
+      }
+
       setStatus({ kind: 'loading', step: 'starting-runtime' });
       // Microtask to let the runtime have a tick before we declare success.
       await new Promise((r) => setTimeout(r, 0));
@@ -237,6 +257,19 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
       onError?.(message);
     }
   }, [assets, containerRef, diagnostics, onError, onMounted, teardown]);
+
+  /** Clicks on the viewport should focus the Director stage (keyboard only works when #stage_canvas_container is focused). */
+  useEffect(() => {
+    if (status.kind !== 'mounted') return;
+    const root = containerRef.current;
+    if (!root) return;
+    const onPointerDownCapture = () => {
+      const host = root.querySelector<HTMLElement>('[data-dirplayer-host]');
+      focusDirectorStage(host);
+    };
+    root.addEventListener('pointerdown', onPointerDownCapture, true);
+    return () => root.removeEventListener('pointerdown', onPointerDownCapture, true);
+  }, [status.kind, containerRef]);
 
   const reset = useCallback(async () => {
     await teardown();

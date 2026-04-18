@@ -45,8 +45,17 @@ export function App() {
   const { status, polyfillStatus, runtimeKey, lastEffectiveDcrUrl, load, reset } = useDirPlayer({
     containerRef,
     assets,
-    onMounted: () =>
-      push({ tone: 'success', title: 'Movie mounted', description: assets.movie?.name }),
+    onMounted: () => {
+      push({ tone: 'success', title: 'Movie mounted', description: assets.movie?.name });
+      if (!assets.cast) {
+        push({
+          tone: 'warning',
+          title: 'External .cct not loaded',
+          description:
+            'Many games fetch files like sound.cct next to the .dcr. Add the matching .cct in the Cast slot (same session as Load) or fetches will fail and input may break.',
+        });
+      }
+    },
     onError: (message) => push({ tone: 'danger', title: 'Load failed', description: message }),
   });
 
