@@ -1,6 +1,7 @@
 import { DEFAULT_STAGE } from './constants';
 import { ensurePolyfillLoaded } from './dirPlayerLoader';
 import type { DirPlayerRuntime, MountConfig, MountedInstance } from './types';
+import { findDirectorStageElement } from './stageElement';
 
 /**
  * WASM maps pointer coords using `player.stage_size` (must match the element that
@@ -14,7 +15,7 @@ function attachStageSizeSync(host: HTMLElement, runtime: DirPlayerRuntime | null
   let observed: Element | null = null;
 
   const sync = () => {
-    const el = host.querySelector('#stage_canvas_container');
+    const el = findDirectorStageElement(host);
     if (!(el instanceof HTMLElement)) return;
     const w = Math.round(el.clientWidth);
     const h = Math.round(el.clientHeight);
@@ -28,7 +29,7 @@ function attachStageSizeSync(host: HTMLElement, runtime: DirPlayerRuntime | null
   };
 
   const ensureObservingStage = () => {
-    const el = host.querySelector('#stage_canvas_container');
+    const el = findDirectorStageElement(host);
     if (!el) {
       return;
     }

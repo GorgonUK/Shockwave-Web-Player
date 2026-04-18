@@ -32,6 +32,8 @@ export function FileSlot({ kind, asset, required, onPick, onRemove }: FileSlotPr
   const meta = META[kind];
 
   const Icon = kind === 'dcr' ? FileIcon : FileMusic;
+  const isIos = /iPad|iPhone|iPod/.test(globalThis.navigator?.userAgent ?? '');
+  const acceptAttr = isIos ? undefined : kind === 'dcr' ? '.dcr' : '.cct';
 
   return (
     <div
@@ -70,7 +72,7 @@ export function FileSlot({ kind, asset, required, onPick, onRemove }: FileSlotPr
         <input
           ref={inputRef}
           type="file"
-          accept={kind === 'dcr' ? '.dcr' : '.cct'}
+          accept={acceptAttr}
           className="sr-only"
           aria-label={`Choose ${kind.toUpperCase()} file`}
           onChange={(e) => {
