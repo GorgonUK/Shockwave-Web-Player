@@ -78,7 +78,9 @@
 
   *:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.55), 0 0 0 4px rgba(124, 92, 255, 0.18);
+    box-shadow:
+      0 0 0 2px rgba(124, 92, 255, 0.55),
+      0 0 0 4px rgba(124, 92, 255, 0.18);
     border-radius: 6px;
     transition: box-shadow 120ms ease;
   }
@@ -154,4 +156,49 @@
   to {
     background-position: 200% 0;
   }
+}
+
+/*
+ * DirPlayer (polyfill) mounts EmbedPlayer with an inline 640×480 root. Our host
+ * fills the viewport; without stretching, the stage stayed a small centered
+ * rectangle — pointer events on the surrounding black area never hit
+ * #stage_canvas_container, so mouse_down / PLAY clicks did nothing.
+ */
+[data-dirplayer-host] > div {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0;
+  /* EmbedPlayer root: make Stage fill height (nested 100% chains often break without flex). */
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+[data-dirplayer-host] > div > div {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/*
+ * Stage (polyfill) uses a flex-centered .container; the inner #stage_canvas_container can end up
+ * with no usable cross-axis size until the canvas is inserted — or stay mis-sized vs the host.
+ * Stretch the stage shell and scale the bitmap canvas to fill the visible area.
+ */
+[data-dirplayer-host] #stage_canvas_container {
+  touch-action: none;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+  position: relative;
+  z-index: 1;
+}
+
+[data-dirplayer-host] #stage_canvas_container canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100%;
+  max-height: 100%;
 }

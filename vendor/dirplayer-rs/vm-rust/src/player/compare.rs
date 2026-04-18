@@ -1,0 +1,371 @@
+use log::warn;
+
+use crate::{
+    console_warn,
+    director::lingo::datum::{Datum, DatumType},
+};
+
+use super::{
+    allocator::{DatumAllocator, DatumAllocatorTrait},
+    bitmap::bitmap::PaletteRef,
+    handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
+    DatumRef, ScriptError,
+};
+
+/// Equality for list membership ops (`getPos`, `findPos`, `getOne`, `deleteOne` fallback).
+///
+/// Director lists may store entries as strings while the search key is a symbol (or the reverse).
+/// Plain [`datum_equals`] returns false for String↔Symbol, which made `getPos` always return `0`
+/// (not-found) for mixed lists.
+pub fn datum_equals_list_search(
+    left: &Datum,
+    right: &Datum,
+    allocator: &DatumAllocator,
+) -> Result<bool, ScriptError> {
+    match (left, right) {
+        (Datum::String(l), Datum::Symbol(r)) => Ok(l.eq_ignore_ascii_case(r)),
+        (Datum::Symbol(l), Datum::String(r)) => Ok(l.eq_ignore_ascii_case(r)),
+        (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
+            Ok(s.parse::<i32>().ok() == Some(*i))
+        }
+        _ => datum_equals(left, right, allocator),
+    }
+}
+
+pub fn datum_equals(
+    left: &Datum,
+    right: &Datum,
+    allocator: &DatumAllocator,
+) -> Result<bool, ScriptError> {
+    match (left, right) {
+        (Datum::Int(left), Datum::Int(right)) => Ok(*left == *right),
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) == *right), // TODO: is this correct? Flutter compares ints instead
+        (Datum::Int(left), Datum::Void) => Ok(*left == 0),
+        // Handle string-to-int comparison (e.g., "2" should match key 2)
+        (Datum::String(s), Datum::Int(i)) | (Datum::Int(i), Datum::String(s)) => {
+            Ok(s.parse::<i32>().ok() == Some(*i))
+        }
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left == (*right as f64)),
+        (Datum::Float(left), Datum::Float(right)) => Ok(*left == *right),
+        // String equality: case-insensitive (like Director `=` operator)
+        (Datum::String(l), Datum::String(r)) => Ok(l.eq_ignore_ascii_case(r)),
+        // StringChunk comparison for equality: case-insensitive too
+        (Datum::StringChunk(..), Datum::String(right)) => {
+            let left_val = left.string_value()?;
+            Ok(left_val.eq_ignore_ascii_case(right))
+        }
+        (Datum::String(left), Datum::StringChunk(..)) => {
+            let right_val = right.string_value()?;
+            Ok(left.eq_ignore_ascii_case(&right_val))
+        }
+        (Datum::StringChunk(..), Datum::StringChunk(..)) => {
+            let left_val = left.string_value()?;
+            let right_val = right.string_value()?;
+            Ok(left_val.eq_ignore_ascii_case(&right_val))
+        }
+        (Datum::ScriptInstanceRef(left), Datum::ScriptInstanceRef(right)) => Ok(**left == **right),
+        (Datum::Symbol(left), Datum::Symbol(right)) => Ok(left.eq_ignore_ascii_case(right)),
+        (Datum::Void, Datum::Void) => Ok(true),
+        (Datum::ColorRef(left), Datum::ColorRef(right)) => Ok(*left == *right),
+        (Datum::Int(_), Datum::Symbol(_)) => Ok(false),
+        (Datum::Void, Datum::Int(right)) => Ok(*right == 0),
+        (Datum::String(_), Datum::ScriptInstanceRef(_)) => Ok(false),
+        (Datum::CastMember(member_ref), Datum::Void) => Ok(!member_ref.is_valid()), // TODO return true if member is empty?
+        (Datum::ScriptInstanceRef(_), Datum::Int(_)) => Ok(false),
+        (Datum::Point(_), Datum::Int(_))
+        | (Datum::Int(_), Datum::Point(_))
+        | (Datum::Rect(_), Datum::Int(_))
+        | (Datum::Int(_), Datum::Rect(_)) => Ok(false),
+        (Datum::PropList(pairs_a, _), Datum::PropList(pairs_b, _)) => {
+            // Fast path: same datum in memory (same DatumRef)
+            if std::ptr::eq(left, right) {
+                return Ok(true);
+            }
+            // Structural comparison: same keys and values in same order
+            if pairs_a.len() != pairs_b.len() {
+                return Ok(false);
+            }
+            for (pair_a, pair_b) in pairs_a.iter().zip(pairs_b.iter()) {
+                let key_a = allocator.get_datum(&pair_a.0);
+                let key_b = allocator.get_datum(&pair_b.0);
+                if !datum_equals(key_a, key_b, allocator)? {
+                    return Ok(false);
+                }
+                let val_a = allocator.get_datum(&pair_a.1);
+                let val_b = allocator.get_datum(&pair_b.1);
+                if !datum_equals(val_a, val_b, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Datum::PropList(..), Datum::Int(_)) => Ok(false),
+        (Datum::BitmapRef(_), Datum::Void) => Ok(false),
+        (Datum::Symbol(_), Datum::CastMember(_)) => Ok(false),
+        (Datum::PaletteRef(_), Datum::CastMember(_)) => Ok(false), // TODO should we compare the cast member?
+        (Datum::Void, Datum::String(_)) => Ok(false),
+        (Datum::SpriteRef(_), Datum::Int(_)) => Ok(false),
+        (Datum::Symbol(_), Datum::StringChunk(..)) => Ok(false),
+        (Datum::Symbol(_), Datum::String(_)) => Ok(false),
+        (Datum::Symbol(_), Datum::Void) => Ok(false),
+        (Datum::String(_), Datum::Symbol(_)) => Ok(false),
+        (Datum::String(left), Datum::Int(right)) => Ok(right.to_string().eq(left)),
+        (Datum::List(_, left, _), Datum::List(_, right, _)) => {
+            if left.len() != right.len() {
+                return Ok(false);
+            }
+            for (left_item, right_item) in left.iter().zip(right.iter()) {
+                let left_item = allocator.get_datum(left_item);
+                let right_item = allocator.get_datum(right_item);
+                if !datum_equals(left_item, right_item, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Datum::TimeoutRef(left), Datum::TimeoutRef(right)) => {
+            // TODO: they're only equal if the timeout has been scheduled
+            Ok(left == right)
+        }
+        (Datum::SpriteRef(left), Datum::SpriteRef(right)) => Ok(left == right),
+        (Datum::CastMember(left), Datum::CastMember(right)) => {
+            Ok(CastMemberRefHandlers::get_cast_slot_number(
+                left.cast_lib as u32,
+                left.cast_member as u32,
+            ) == CastMemberRefHandlers::get_cast_slot_number(
+                right.cast_lib as u32,
+                right.cast_member as u32,
+            ))
+        }
+        (Datum::Point(left), Datum::Point(right)) => {
+            for i in 0..2 {
+                let left_val = allocator.get_datum(&left[i]);
+                let right_val = allocator.get_datum(&right[i]);
+                if !datum_equals(left_val, right_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // List-Point and Point-List comparison (Director treats 2-element lists and points interchangeably)
+        (Datum::List(_, list, _), Datum::Point(point))
+        | (Datum::Point(point), Datum::List(_, list, _)) => {
+            if list.len() != 2 {
+                return Ok(false);
+            }
+            for i in 0..2 {
+                let list_val = allocator.get_datum(&list[i]);
+                let point_val = allocator.get_datum(&point[i]);
+                if !datum_equals(list_val, point_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Datum::Null, Datum::Int(_)) => Ok(false),
+        (Datum::PropList(..), Datum::Void) => Ok(false),
+        (Datum::Symbol(_), Datum::Int(_)) => Ok(false),
+        (Datum::PaletteRef(palette_ref), Datum::Symbol(symbol)) => match palette_ref {
+            PaletteRef::BuiltIn(palette) => {
+                Ok(palette.symbol_string().eq_ignore_ascii_case(&symbol))
+            }
+            _ => Ok(false),
+        },
+        (Datum::String(_), Datum::Void) => Ok(false),
+        (Datum::Void, Datum::Symbol(_)) => Ok(false),
+        (Datum::Rect(left), Datum::Rect(right)) => {
+            for i in 0..4 {
+                let left_val = allocator.get_datum(&left[i]);
+                let right_val = allocator.get_datum(&right[i]);
+                if !datum_equals(left_val, right_val, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Datum::ColorRef(color_ref), Datum::String(string)) => {
+            warn!(
+                "Datum equals not supported for ColorRef and String: {:?} and {}",
+                color_ref, string
+            );
+            Ok(false)
+        }
+        (Datum::ScriptRef(a_ref), Datum::ScriptRef(b_ref)) => Ok(a_ref == b_ref),
+        _ => {
+            warn!(
+                "datum_equals not supported for types: {} and {}",
+                left.type_str(),
+                right.type_str()
+            );
+            Ok(false)
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn datum_greater_than(
+    left: &Datum,
+    right: &Datum,
+    allocator: &DatumAllocator,
+) -> Result<bool, ScriptError> {
+    match (left, right) {
+        // Int comparisons
+        (Datum::Int(left), Datum::Int(right)) => Ok(*left > *right),
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) > *right),
+        (Datum::Int(left), Datum::Void) => Ok(*left > 0),
+        (Datum::Int(left), Datum::String(right)) => {
+            if let Ok(right_number) = right.parse::<i32>() {
+                Ok(*left > right_number)
+            } else {
+                Ok(right.is_empty())
+            }
+        }
+
+        // Float comparisons
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f64)),
+        (Datum::Float(left), Datum::Float(right)) => Ok(*left > *right),
+        (Datum::Float(left), Datum::Void) => Ok(*left > 0.0),
+
+        // Void comparisons - Void is never > any number
+        (Datum::Void, Datum::Int(_)) => Ok(false),
+        (Datum::Void, Datum::Float(_)) => Ok(false),
+
+        // Point comparisons
+        (Datum::Point(left), Datum::Point(right)) => {
+            let left_x = allocator.get_datum(&left[0]).int_value()?;
+            let left_y = allocator.get_datum(&left[1]).int_value()?;
+            let right_x = allocator.get_datum(&right[0]).int_value()?;
+            let right_y = allocator.get_datum(&right[1]).int_value()?;
+            Ok(left_x > right_x && left_y > right_y)
+        }
+
+        // Catch-all
+        _ => {
+            warn!(
+                "datum_greater_than not supported for types: {} and {}",
+                left.type_str(),
+                right.type_str()
+            );
+            Ok(false)
+        }
+    }
+}
+
+pub fn datum_less_than(
+    left: &Datum,
+    right: &Datum,
+    allocator: &DatumAllocator,
+) -> Result<bool, ScriptError> {
+    match (left, right) {
+        // Int comparisons
+        (Datum::Int(left), Datum::Int(right)) => Ok(*left < *right),
+        (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) < *right),
+        (Datum::Int(left), Datum::Void) => Ok(*left < 0),
+        (Datum::Int(left), Datum::String(right)) => {
+            if let Ok(right_number) = right.parse::<i32>() {
+                Ok(*left < right_number)
+            } else {
+                Ok(!right.is_empty())
+            }
+        }
+
+        // Float comparisons
+        (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f64)),
+        (Datum::Float(left), Datum::Float(right)) => Ok(*left < *right),
+        (Datum::Float(left), Datum::Void) => Ok(*left < 0.0),
+
+        // Void comparisons - Void is always < any number
+        (Datum::Void, Datum::Int(_)) => Ok(true),
+        (Datum::Void, Datum::Float(_)) => Ok(true),
+
+        // Point comparisons
+        (Datum::Point(left), Datum::Point(right)) => {
+            let left_x = allocator.get_datum(&left[0]).int_value()?;
+            let left_y = allocator.get_datum(&left[1]).int_value()?;
+            let right_x = allocator.get_datum(&right[0]).int_value()?;
+            let right_y = allocator.get_datum(&right[1]).int_value()?;
+            Ok(left_x < right_x && left_y < right_y)
+        }
+
+        // String comparisons
+        (Datum::String(..), Datum::String(..)) => Ok(false),
+
+        // PropList comparisons - Director compares property lists by their first value.
+        // This is essential for sorted lists used as priority queues (e.g. A* pathfinding).
+        (Datum::PropList(left_pairs, ..), Datum::PropList(right_pairs, ..)) => {
+            if let (Some((_, left_val)), Some((_, right_val))) =
+                (left_pairs.first(), right_pairs.first())
+            {
+                let left_datum = allocator.get_datum(left_val);
+                let right_datum = allocator.get_datum(right_val);
+                datum_less_than(left_datum, right_datum, allocator)
+            } else {
+                Ok(false)
+            }
+        }
+
+        // Catch-all
+        _ => {
+            warn!(
+                "datum_less_than not supported for types: {} and {}",
+                left.type_str(),
+                right.type_str()
+            );
+            Ok(false)
+        }
+    }
+}
+
+pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, ScriptError> {
+    Ok(match datum {
+        Datum::Int(value) => *value == 0,
+        Datum::Float(value) => *value == 0.0,
+        Datum::Void => true,
+        Datum::ScriptInstanceRef(_) => false,
+        Datum::Null => true,
+        Datum::Point(arr) => {
+            let x = datums.get_datum(&arr[0]).int_value()?;
+            let y = datums.get_datum(&arr[1]).int_value()?;
+            x == 0 && y == 0
+        }
+        Datum::Rect(arr) => {
+            let l = datums.get_datum(&arr[0]).int_value()?;
+            let t = datums.get_datum(&arr[1]).int_value()?;
+            let r = datums.get_datum(&arr[2]).int_value()?;
+            let b = datums.get_datum(&arr[3]).int_value()?;
+            l == 0 && t == 0 && r == 0 && b == 0
+        }
+        _ => {
+            warn!("datum_is_zero not supported for type: {}", datum.type_str());
+            datum.int_value()? == 0
+        }
+    })
+}
+
+pub fn sort_datums(
+    datums: &Vec<DatumRef>,
+    allocator: &DatumAllocator,
+) -> Result<Vec<DatumRef>, ScriptError> {
+    let mut sorted_list = datums.clone();
+    sorted_list.sort_by(|a, b| {
+        let left = allocator.get_datum(a);
+        let right = allocator.get_datum(b);
+
+        if datum_equals(left, right, allocator).unwrap() {
+            return std::cmp::Ordering::Equal;
+        } else if datum_less_than(left, right, allocator).unwrap() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+    Ok(sorted_list)
+}
+
+fn datum_to_f64(datum: &Datum) -> Result<f64, ScriptError> {
+    match datum {
+        Datum::Int(i) => Ok(*i as f64),
+        Datum::Float(f) => Ok(*f),
+        _ => datum.float_value(),
+    }
+}

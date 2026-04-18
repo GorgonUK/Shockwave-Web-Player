@@ -1,33 +1,45 @@
 /**
- * Single source of truth for the polyfill location and probe surface.
+ * Single source of truth for the browser runtime bundle and probe surface.
  *
- * If the polyfill bundle gets renamed (e.g. a new version `dirplayer-polyfill-0.5.0.js`),
- * just update POLYFILL_SRC here — nothing else in the app should know the URL.
+ * We keep two runtime slots:
+ * - `upstream`: the checked-in upstream bundle
+ * - `local`: a locally rebuilt / patched bundle copied from `vendor/dirplayer-rs`
+ *
+ * Switch between them with `VITE_DIRPLAYER_RUNTIME_SOURCE=upstream|local`.
  */
-export const POLYFILL_SRC = '/dirplayer/dirplayer-polyfill.js';
+export const DIRPLAYER_RUNTIME_SOURCES = {
+  upstream: '/dirplayer/dirplayer-polyfill.js',
+  local: '/dirplayer/dirplayer-polyfill.local.js',
+} as const;
 
-export const POLYFILL_SCRIPT_ID = 'dirplayer-polyfill-script';
+export type DirPlayerRuntimeSource = keyof typeof DIRPLAYER_RUNTIME_SOURCES;
+
+function resolveRuntimeSource(): DirPlayerRuntimeSource {
+  const requested = import.meta.env.VITE_DIRPLAYER_RUNTIME_SOURCE?.trim().toLowerCase();
+  return requested === 'local' ? 'local' : 'upstream';
+}
+
+export const DIRPLAYER_RUNTIME_SOURCE = resolveRuntimeSource();
+export const POLYFILL_SRC = DIRPLAYER_RUNTIME_SOURCES[DIRPLAYER_RUNTIME_SOURCE];
+
+/**
+ * Must vary with {@link DIRPLAYER_RUNTIME_SOURCE}: same DOM id + different URL would
+ * otherwise skip injection and leave the previous WASM bundle active after a switch.
+ */
+export const POLYFILL_SCRIPT_ID = `dirplayer-polyfill-script-${DIRPLAYER_RUNTIME_SOURCE}` as const;
 
 /**
  * Probed in order to detect "is the polyfill present and exposing a runtime?".
- * Real builds may attach to one of these globals; we accept any of them and
- * report which one was found in diagnostics.
- *
- * TODO(DirPlayer): once we know the actual global the bundle exposes, narrow
- * this list and update GLOBAL_PROBE_KEYS to the canonical name only.
+ * The current bundle exposes `window.DirPlayer`, but we keep a narrow fallback
+ * list so diagnostics stay useful while iterating on local builds.
  */
-export const GLOBAL_PROBE_KEYS = [
-  'DirPlayer',
-  'dirPlayer',
-  '__DIRPLAYER__',
-  'dirplayer',
-] as const;
+export const GLOBAL_PROBE_KEYS = ['DirPlayer', 'dirPlayer', '__DIRPLAYER__', 'dirplayer'] as const;
 
 /**
  * If the polyfill exposes nothing global (it might bootstrap itself by
  * scanning the DOM), we still consider it "ready" once the script tag has
  * loaded. This flag controls whether a missing global flips us to
- * 'loaded-no-global' (true, stricter) or 'ready' (false, looser).
+ * `loaded-no-global` (true, stricter) or `ready` (false, looser).
  */
 export const REQUIRE_GLOBAL_FOR_READY = false;
 

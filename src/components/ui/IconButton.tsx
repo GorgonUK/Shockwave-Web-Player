@@ -39,7 +39,8 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
         'disabled:cursor-not-allowed disabled:opacity-40',
         TONES[tone],
         SIZES[size],
-        active && 'bg-[var(--color-accent-500)]/15 text-[var(--color-accent-300)] border-[var(--color-accent-500)]/40',
+        active &&
+          'bg-[var(--color-accent-500)]/15 text-[var(--color-accent-300)] border-[var(--color-accent-500)]/40',
         className,
       )}
       {...rest}

@@ -16,10 +16,8 @@ export function PlaybackCompatibilityBanner({ status, onReset }: PlaybackCompati
 
   const { variant, message, detail } = status;
   const isMissing = variant === 'missing-builtin';
-  const handler =
-    detail.parsed.kind === 'missing-builtin' ? detail.parsed.handlerName : null;
-  const argsPrev =
-    detail.parsed.kind === 'missing-builtin' ? detail.parsed.argsPreview : null;
+  const handler = detail.parsed.kind === 'missing-builtin' ? detail.parsed.handlerName : null;
+  const argsPrev = detail.parsed.kind === 'missing-builtin' ? detail.parsed.argsPreview : null;
 
   return (
     <div

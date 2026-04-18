@@ -19,9 +19,7 @@ export function PlayerStateOverlay({ status, hasMovie }: PlayerStateOverlayProps
     >
       <div className="pointer-events-auto flex max-w-md flex-col items-center gap-3 text-center">
         {status.kind === 'idle' && <IdleState hasMovie={hasMovie} />}
-        {status.kind === 'loading' && (
-          <LoadingState label={LOADING_LABELS[status.step]} />
-        )}
+        {status.kind === 'loading' && <LoadingState label={LOADING_LABELS[status.step]} />}
         {status.kind === 'error' && <ErrorState message={status.message} />}
       </div>
     </div>
@@ -69,7 +67,9 @@ function ErrorState({ message }: { message: string }) {
         <AlertTriangle size={22} />
       </div>
       <div>
-        <h3 className="text-[15px] font-semibold text-[var(--color-fg)]">Could not start playback</h3>
+        <h3 className="text-[15px] font-semibold text-[var(--color-fg)]">
+          Could not start playback
+        </h3>
         <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">{message}</p>
       </div>
     </>

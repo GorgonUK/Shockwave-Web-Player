@@ -10,7 +10,7 @@ import type { AssetSlots } from '@/types/assets';
 import type { PlayerStatus } from '@/types/player';
 import type { BrowserEnv } from '@/lib/browser/env';
 import { useDiagnostics } from '@/hooks/useDiagnostics';
-import { POLYFILL_SRC } from '@/lib/dirplayer/constants';
+import { DIRPLAYER_RUNTIME_SOURCE, POLYFILL_SRC } from '@/lib/dirplayer/constants';
 import { inferMovieUrlKind } from '@/lib/dirplayer/runtimeDiagnostics';
 
 interface DiagnosticsPanelProps {
@@ -37,12 +37,24 @@ export function DiagnosticsPanel({
   env,
   viewport,
 }: DiagnosticsPanelProps) {
-  const { errors, runtimeScriptEvents, clearErrors, clearRuntimeScriptEvents, clearAllDiagnostics } =
-    useDiagnostics();
+  const {
+    errors,
+    runtimeScriptEvents,
+    runtimeTraceEvents,
+    clearErrors,
+    clearRuntimeScriptEvents,
+    clearRuntimeTraceEvents,
+    clearAllDiagnostics,
+  } = useDiagnostics();
 
   const dump = JSON.stringify(
     {
-      polyfill: { status: polyfillStatus, src: POLYFILL_SRC, runtimeKey },
+      polyfill: {
+        status: polyfillStatus,
+        source: DIRPLAYER_RUNTIME_SOURCE,
+        src: POLYFILL_SRC,
+        runtimeKey,
+      },
       player: status,
       lastEffectiveDcrUrl,
       assets: {
@@ -59,6 +71,7 @@ export function DiagnosticsPanel({
       },
       viewport,
       errors: errors.slice(0, 10),
+      runtimeTrace: runtimeTraceEvents.slice(0, 20),
       runtimeCompatibility: runtimeScriptEvents.slice(0, 20),
     },
     null,
@@ -105,7 +118,9 @@ export function DiagnosticsPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {errors.length === 0 && runtimeScriptEvents.length === 0 ? (
+          {errors.length === 0 &&
+          runtimeScriptEvents.length === 0 &&
+          runtimeTraceEvents.length === 0 ? (
             <Badge tone="success" dot>
               Healthy
             </Badge>
@@ -118,6 +133,9 @@ export function DiagnosticsPanel({
               ) : null}
               {runtimeScriptEvents.length > 0 ? (
                 <Badge tone="warning">{runtimeScriptEvents.length} runtime</Badge>
+              ) : null}
+              {runtimeTraceEvents.length > 0 ? (
+                <Badge tone="warning">{runtimeTraceEvents.length} trace</Badge>
               ) : null}
             </div>
           )}
@@ -144,7 +162,17 @@ export function DiagnosticsPanel({
                 value={POLYFILL_STATUS_LABELS[polyfillStatus]}
                 mono={false}
               />
-              <DiagnosticsRow label="Source" value={POLYFILL_SRC} copyable copyText={POLYFILL_SRC} />
+              <DiagnosticsRow
+                label="Runtime source"
+                value={DIRPLAYER_RUNTIME_SOURCE}
+                mono={false}
+              />
+              <DiagnosticsRow
+                label="Source"
+                value={POLYFILL_SRC}
+                copyable
+                copyText={POLYFILL_SRC}
+              />
               <DiagnosticsRow label="Global key" value={runtimeKey ?? 'none'} />
               <DiagnosticsRow label="Mount" value={describePlayer(status)} mono={false} />
             </Section>
@@ -173,9 +201,7 @@ export function DiagnosticsPanel({
               />
               <DiagnosticsRow
                 label="Movie URL kind"
-                value={
-                  lastEffectiveDcrUrl ? inferMovieUrlKind(lastEffectiveDcrUrl) : '—'
-                }
+                value={lastEffectiveDcrUrl ? inferMovieUrlKind(lastEffectiveDcrUrl) : '—'}
                 mono={false}
               />
             </Section>
@@ -188,10 +214,7 @@ export function DiagnosticsPanel({
               <DiagnosticsRow label="Touch" value={String(env.isTouch)} />
               <DiagnosticsRow label="Fullscreen" value={String(env.supportsFullscreen)} />
               <DiagnosticsRow label="Reduced motion" value={String(env.prefersReducedMotion)} />
-              <DiagnosticsRow
-                label="Viewport"
-                value={`${viewport.width} × ${viewport.height}`}
-              />
+              <DiagnosticsRow label="Viewport" value={`${viewport.width} × ${viewport.height}`} />
               <DiagnosticsRow
                 label="User agent"
                 value={env.userAgent}
@@ -234,15 +257,78 @@ export function DiagnosticsPanel({
                         </span>
                         <time>{new Date(ev.at).toLocaleTimeString()}</time>
                       </div>
-                      <div className="mt-1 break-all text-[var(--color-fg-muted)]">{ev.rawMessage}</div>
+                      <div className="mt-1 break-all text-[var(--color-fg-muted)]">
+                        {ev.rawMessage}
+                      </div>
                       {ev.parsed.kind === 'missing-builtin' ? (
                         <div className="mt-1 text-[var(--color-fg-subtle)]">
-                          args: ({ev.parsed.argsPreview.length > 120 ? `${ev.parsed.argsPreview.slice(0, 120)}…` : ev.parsed.argsPreview})
+                          args: (
+                          {ev.parsed.argsPreview.length > 120
+                            ? `${ev.parsed.argsPreview.slice(0, 120)}…`
+                            : ev.parsed.argsPreview}
+                          )
                         </div>
                       ) : null}
                       <div className="mt-1 text-[10px] text-[var(--color-fg-subtle)]">
                         movie: {ev.movieFileName ?? '—'} · url: {ev.movieUrlKind}
                         {ev.occurrenceIndex ? ` · repeat #${ev.occurrenceIndex + 1}` : ''}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Section>
+
+            <Section
+              title="Runtime tracing"
+              action={
+                runtimeTraceEvents.length > 0 ? (
+                  <IconButton
+                    label="Clear runtime traces"
+                    icon={<Trash2 size={13} />}
+                    size="sm"
+                    onClick={clearRuntimeTraceEvents}
+                  />
+                ) : null
+              }
+            >
+              {runtimeTraceEvents.length === 0 ? (
+                <p className="text-[12px] text-[var(--color-fg-subtle)]">
+                  No local runtime trace events captured yet. When the patched local bundle runs,
+                  built-in fallback and getPos patch traces will appear here.
+                </p>
+              ) : (
+                <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
+                  {runtimeTraceEvents.slice(0, 14).map((ev) => (
+                    <li
+                      key={ev.id}
+                      className="rounded-md border border-[var(--color-border)] bg-white/[0.015] p-2 font-mono text-[10.5px] leading-snug"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--color-fg-subtle)]">
+                        <span className="uppercase tracking-wide text-[var(--color-warning)]">
+                          {ev.parsed.traceKind}
+                          {ev.parsed.handlerName ? ` / ${ev.parsed.handlerName}` : ''}
+                        </span>
+                        <time>{new Date(ev.at).toLocaleTimeString()}</time>
+                      </div>
+                      {ev.parsed.argTypes.length > 0 ? (
+                        <div className="mt-1 text-[var(--color-fg-subtle)]">
+                          arg types: {ev.parsed.argTypes.join(', ')}
+                        </div>
+                      ) : null}
+                      {ev.parsed.argsPreview ? (
+                        <div className="mt-1 break-all text-[var(--color-fg-muted)]">
+                          args: {ev.parsed.argsPreview}
+                        </div>
+                      ) : null}
+                      {ev.parsed.returnType || ev.parsed.returnValue ? (
+                        <div className="mt-1 break-all text-[var(--color-fg-subtle)]">
+                          return: {ev.parsed.returnType ?? 'unknown'}
+                          {ev.parsed.returnValue ? ` = ${ev.parsed.returnValue}` : ''}
+                        </div>
+                      ) : null}
+                      <div className="mt-1 text-[10px] text-[var(--color-fg-subtle)]">
+                        movie: {ev.movieFileName ?? '-'} / url: {ev.movieUrlKind}
                       </div>
                     </li>
                   ))}

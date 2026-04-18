@@ -36,14 +36,17 @@ export function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  const { isFullscreen, supported: fullscreenSupported, toggle: toggleFullscreen } = useFullscreen(
-    wrapperRef,
-  );
+  const {
+    isFullscreen,
+    supported: fullscreenSupported,
+    toggle: toggleFullscreen,
+  } = useFullscreen(wrapperRef);
 
   const { status, polyfillStatus, runtimeKey, lastEffectiveDcrUrl, load, reset } = useDirPlayer({
     containerRef,
     assets,
-    onMounted: () => push({ tone: 'success', title: 'Movie mounted', description: assets.movie?.name }),
+    onMounted: () =>
+      push({ tone: 'success', title: 'Movie mounted', description: assets.movie?.name }),
     onError: (message) => push({ tone: 'danger', title: 'Load failed', description: message }),
   });
 

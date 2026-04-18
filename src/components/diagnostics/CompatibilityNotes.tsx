@@ -12,8 +12,8 @@ export function CompatibilityNotes({ env }: { env: BrowserEnv }) {
         <ul className="flex flex-col gap-2.5">
           <Note
             icon={<Volume2 size={14} />}
-            title="Audio requires a tap"
-            body="iPhone Safari (and Chrome) only allow audio to start after a user gesture. Press Load — that counts as the gesture."
+            title="Audio needs a user gesture"
+            body="Browsers unlock the Web Audio path after a gesture. Press Load first; if there is still no sound, click once on the game stage (e.g. PLAY) — that often resumes the audio context for Shockwave."
           />
           <Note
             icon={<Apple size={14} />}
@@ -24,7 +24,7 @@ export function CompatibilityNotes({ env }: { env: BrowserEnv }) {
           <Note
             icon={<FolderTree size={14} />}
             title="External cast (.cct) path resolution"
-            body="Director runtimes typically resolve external casts by relative filename. Local object URLs lose that filename — full external-cast support may need a static-hosting mode where assets live at predictable paths (e.g. /games/<slug>/sound.cct)."
+            body="If a game loads files like sound.cct next to the .dcr, add the matching .cct in the Cast slot. The app registers it under the same /__dirplayer-blob/… prefix as your movie so fetches succeed. Use the original filename the game expects (often sound.cct)."
           />
         </ul>
       </CardSection>
@@ -47,9 +47,7 @@ function Note({
     <li
       className={
         'flex gap-3 rounded-[12px] border border-[var(--color-border)] bg-white/[0.012] p-3 ' +
-        (highlight
-          ? 'border-[var(--color-warning)]/35 bg-[var(--color-warning)]/[0.04]'
-          : '')
+        (highlight ? 'border-[var(--color-warning)]/35 bg-[var(--color-warning)]/[0.04]' : '')
       }
     >
       <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-accent-300)]">

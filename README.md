@@ -67,7 +67,7 @@ When the file is missing the app does not crash — it shows a calm "DirPlayer p
 
 `URL.createObjectURL(file)` produces an opaque `blob:` URL. The hook `useObjectUrls` tracks every URL it creates and revokes it on replace / clear / unmount, so there are no leaks.
 
-**Why not pass `blob:` straight into DirPlayer?** The WASM runtime resolves relative paths using Rust’s `url` crate; `blob:` URLs are not valid bases and trigger `RelativeUrlWithCannotBeABaseBase` in `get_base_url`. Before mount, [`ensureWasmSafeDcrUrl`](src/lib/dirplayer/wasmSafeMovieUrl.ts) registers the `File` in the **Cache API** and passes a synthetic same-origin URL like `/__dirplayer-blob/<uuid>/movie.dcr`. The small Service Worker [`public/dirplayer-blob-sw.js`](public/dirplayer-blob-sw.js) serves those requests from the cache (no backend). Service Workers are required for this path; use HTTPS or `localhost`.
+**Why not pass `blob:` straight into DirPlayer?** The WASM runtime resolves relative paths using Rust’s `url` crate; `blob:` URLs are not valid bases and trigger `RelativeUrlWithCannotBeABaseBase` in `get_base_url`. Before mount, [`ensureWasmSafeBlobSession`](src/lib/dirplayer/wasmSafeMovieUrl.ts) registers the `File` (and optional `.cct` from the Cast slot) in the **Cache API** under one `/__dirplayer-blob/<uuid>/` prefix so relative loads like `sound.cct` resolve next to `movie.dcr`. The small Service Worker [`public/dirplayer-blob-sw.js`](public/dirplayer-blob-sw.js) serves those requests from the cache (no backend). Service Workers are required for this path; use HTTPS or `localhost`.
 
 ### Runtime compatibility (DirPlayer / Lingo gaps)
 
@@ -77,19 +77,11 @@ Even with a valid same-origin movie URL, some titles stop with **script errors**
 - Parses messages in [`runtimeDiagnostics`](src/lib/dirplayer/runtimeDiagnostics.ts) (handler name, args preview, classification).
 - Sets player status to **playback-issue**, shows a **compatibility banner**, and lists events under **Runtime compatibility** in the diagnostics panel.
 
-**Feasibility:** implementing a missing built-in such as `getPos` correctly belongs in **DirPlayer upstream** unless the polyfill adds an official JS registration API. This repo does not fake VM builtins by default; optional game-specific hooks live under [`src/lib/dirplayer/compat/`](src/lib/dirplayer/compat/) (see `registry.ts`, `trickOrTreatBeat.ts` as a documented placeholder).
+**Source-level status:** we now vendor the matching DirPlayer `v0.4.1` source and patch the runtime locally at the actual built-in dispatch layer. `getPos` already existed for list and prop-list datum handlers; the missing piece was the global built-in dispatcher, which handled `findPos` but not `getPos`. This remains provisional compatibility work, but it is a real VM patch, not a UI-layer shim.
 
 ### About the `.cct` external cast
 
-Director runtimes typically resolve external casts (e.g. `castLib("sound").preLoad()`) by relative **filename** next to the `.dcr`. Local uploads turn into `blob:` URLs which have no filename and no parent directory — so the runtime cannot satisfy that lookup using the URL alone.
-
-The app keeps the `.cct` file (with its original filename and size) in state and forwards it into `MountConfig.cct` so the future bridge layer has everything it needs. Strategies to fully wire it later:
-
-1. **Virtual filesystem hook** in the polyfill — register the cct under its original name before the movie initializes.
-2. **Static hosting mode** — serve assets at predictable paths (e.g. `/games/<slug>/sound.cct`) and pass `basePath: '/games/<slug>/'` to the runtime.
-3. **Custom fetch interceptor** — rewrite requests for `sound.cct` to the active blob URL.
-
-A "Compatibility notes" card in the UI explains this for end users.
+Director resolves files like `sound.cct` **relative to the movie URL**. For local uploads, add the `.cct` in the **Cast** slot: the app registers it in the same `/__dirplayer-blob/<uuid>/` Cache API session as the `.dcr`, so `fetch(…/sound.cct)` succeeds. Use the filename the game expects (commonly `sound.cct`). For static hosting, you can instead serve the folder at a real path and load the `.dcr` from there without the blob proxy.
 
 ## What's left to wire
 
@@ -132,7 +124,69 @@ src/
 
 1. Push this repo to GitHub.
 2. Import on Vercel — it autodetects Vite. The included [`vercel.json`](vercel.json) sets the SPA rewrite and adds long-lived cache headers for `/dirplayer/*`.
-3. Done. No environment variables, no server runtime needed — everything runs in the user's browser.
+3. Optional: set **`VITE_DIRPLAYER_RUNTIME_SOURCE=local`** in the project’s environment variables if you want production to use the patched [`public/dirplayer/dirplayer-polyfill.local.js`](public/dirplayer/dirplayer-polyfill.local.js) (e.g. after `npm run dirplayer:build-local` and commit). Default production builds use the stock **`dirplayer-polyfill.js`** because `.env.development` does not apply to `vite build`.
+4. Done. No server runtime needed — everything runs in the user's browser.
+
+## Local DirPlayer workflow
+
+The repo now vendors the matching DirPlayer runtime source at:
+
+```text
+vendor/dirplayer-rs/
+```
+
+The app supports two browser bundle slots:
+
+```text
+public/dirplayer/dirplayer-polyfill.js
+public/dirplayer/dirplayer-polyfill.local.js
+```
+
+- `dirplayer-polyfill.js` is the checked-in upstream bundle.
+- `dirplayer-polyfill.local.js` is a locally rebuilt / patched bundle copied from `vendor/dirplayer-rs/dist-polyfill/dirplayer-polyfill.js`.
+
+**Development defaults to the local bundle:** [`.env.development`](.env.development) sets `VITE_DIRPLAYER_RUNTIME_SOURCE=local`, so `npm run dev` loads `/dirplayer/dirplayer-polyfill.local.js` (the patched WASM). Override when comparing against stock upstream:
+
+```bash
+VITE_DIRPLAYER_RUNTIME_SOURCE=upstream npm run dev
+```
+
+Or copy [`.env.example`](.env.example) to `.env.development.local` (gitignored) and set `VITE_DIRPLAYER_RUNTIME_SOURCE=upstream` there.
+
+The local rebuild workflow is:
+
+```bash
+npm run dirplayer:build-local
+```
+
+That script:
+
+- installs vendored JS dependencies
+- builds the Rust wasm package
+- builds the standalone browser polyfill
+- copies the result into `public/dirplayer/dirplayer-polyfill.local.js`
+
+Current `getPos` finding:
+
+- source inspection of vendored DirPlayer `v0.4.1` shows `getPos` already exists for list and prop-list datum handlers
+- the real gap was the built-in dispatcher in `vm-rust/src/player/handlers/manager.rs`, which handled `findPos` but not `getPos`
+- a bare Lingo call like `getPos(list, item)` therefore hit the missing built-in fallback even though the list-search logic already existed
+
+For the observed game call:
+
+```lingo
+getPos([#ts_cn01_01, #ts_cn01_02, ..., #ts_h10_56], #ts_b01)
+```
+
+the most likely meaning is "find the 1-based position of `#ts_b01` inside the symbol list". That makes it a list/index helper, not a geometry-position API.
+
+The longer investigation note is in [`docs/dirplayer-getpos-investigation.md`](docs/dirplayer-getpos-investigation.md).
+
+### Browser console noise
+
+- **`mobile-web-app-capable`**: [`index.html`](index.html) includes both the standard meta tag and legacy `apple-mobile-web-app-capable` for iOS.
+- **`init()` deprecation**: The vendored VM uses wasm-bindgen’s preferred `init({ module_or_path: url })` form (see `VMProvider.tsx`); rebuild the local polyfill after changing vendor code.
+- **DirPlayer warnings** such as “Cast … has no CAS* chunk”, “Loading system font”, or font/cast messages come from the **WASM runtime** and reflect how a given `.dcr` references built-in casts — not something the React shell can silence without upstream emulator changes.
 
 ## Current limitations
 

@@ -1,0 +1,946 @@
+use log::warn;
+
+use super::handler_manager::BytecodeHandlerContext;
+use crate::player::handlers::datum_handlers::{
+    list_handlers::ListDatumHandlers, sound_channel::SoundChannelDatumHandlers,
+};
+use crate::{
+    director::lingo::{
+        constants::{
+            get_anim_prop_name, get_cast_member_prop_name, get_sound_prop_name,
+            get_sprite_prop_name, movie_prop_names, sprite_prop_names,
+        },
+        datum::{Datum, StringChunkType},
+    },
+    player::{
+        allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
+        handlers::datum_handlers::{
+            cast_member_ref::CastMemberRefHandlers, string_chunk::StringChunkUtils,
+        },
+        reserve_player_mut,
+        score::{sprite_get_prop, sprite_set_prop},
+        script::{
+            get_current_handler_def, get_current_variable_multiplier, get_name, get_obj_prop,
+            player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
+            script_set_static_prop,
+        },
+        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, PLAYER_OPT,
+    },
+};
+
+pub struct GetSetBytecodeHandler {}
+pub struct GetSetUtils {}
+
+impl GetSetUtils {
+    pub fn get_the_built_in_prop(
+        player: &mut DirPlayer,
+        ctx: &BytecodeHandlerContext,
+        prop_name: &str,
+    ) -> Result<DatumRef, ScriptError> {
+        match prop_name {
+            "paramCount" => Ok(player.alloc_datum(Datum::Int(
+                player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32,
+            ))),
+            "result" => Ok(player.last_handler_result.clone()),
+            _ => player.get_movie_prop(prop_name),
+        }
+    }
+
+    pub fn set_the_built_in_prop(
+        player: &mut DirPlayer,
+        _ctx: &BytecodeHandlerContext,
+        prop_name: &str,
+        value: Datum,
+    ) -> Result<(), ScriptError> {
+        match prop_name {
+            _ => player.set_movie_prop(prop_name, value),
+        }
+    }
+
+    pub fn get_top_level_prop(
+        player: &mut DirPlayer,
+        prop_name: &str,
+    ) -> Result<Datum, ScriptError> {
+        match prop_name {
+            "_player" => Ok(Datum::PlayerRef),
+            "_movie" => Ok(Datum::MovieRef),
+            _ => Err(ScriptError::new(format!(
+                "Invalid top level prop: {}",
+                prop_name
+            ))),
+        }
+    }
+}
+
+impl GetSetBytecodeHandler {
+    /// Walk the receiver's ancestor chain to find the instance whose script
+    /// matches the handler's script_ref. This is the "handler's owning instance"
+    /// — the correct target for bare property access (getprop/setprop) in
+    /// Director's prototypal inheritance model.
+    fn find_handler_level_instance(
+        player: &DirPlayer,
+        receiver: &crate::player::script_ref::ScriptInstanceRef,
+        script_ref: &crate::player::cast_lib::CastMemberRef,
+    ) -> crate::player::script_ref::ScriptInstanceRef {
+        let mut walk_ref = receiver.clone();
+        for _ in 0..100 {
+            let instance = player.allocator.get_script_instance(&walk_ref);
+            if instance.script == *script_ref {
+                return walk_ref;
+            }
+            let next = instance.ancestor.clone();
+            match next {
+                Some(ancestor_ref) => walk_ref = ancestor_ref,
+                None => break,
+            }
+        }
+        // Fallback to receiver if handler's script not found in chain
+        receiver.clone()
+    }
+
+    pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let (receiver, script_ref) = {
+            let scope = player.scopes.get(ctx.scope_ref).unwrap();
+            (scope.receiver.clone(), scope.script_ref.clone())
+        };
+        let name_id = player.get_ctx_current_bytecode(ctx).obj as u16;
+        let prop_name = ctx.get_name(name_id).to_owned();
+
+        let result = if let Some(instance_ref) = receiver {
+            // In Director, bare property access (getprop) resolves on the
+            // handler's owning instance in the ancestor chain, not on the
+            // top-level receiver. This matters when a handler from an ancestor
+            // script runs with a child instance as receiver — e.g., when
+            // `ancestor.getMember()` is called, `ancestor` should resolve to
+            // the handler's own instance's ancestor, not the receiver's.
+            let handler_instance =
+                Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+            script_get_prop(player, &handler_instance, &prop_name)?
+        } else {
+            script_get_static_prop(player, &script_ref, &prop_name)?
+        };
+        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+        scope.stack.push(result);
+        return Ok(HandlerExecutionResult::Advance);
+    }
+
+    pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id).to_owned();
+
+        reserve_player_mut(|player| {
+            let (value_ref, receiver, script_ref) = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let value_ref = scope.stack.pop().unwrap();
+                (value_ref, scope.receiver.clone(), scope.script_ref.clone())
+            };
+
+            match receiver {
+                Some(instance_ref) => {
+                    if *instance_ref == 0 {
+                        return Err(ScriptError::new(format!(
+                            "Can't set prop {} of Void",
+                            prop_name
+                        )));
+                    }
+                    // Resolve on handler's owning instance level (see get_prop comment)
+                    let handler_instance =
+                        Self::find_handler_level_instance(player, &instance_ref, &script_ref);
+                    script_set_prop(player, &handler_instance, &prop_name, &value_ref, false)?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                None => {
+                    script_set_static_prop(player, &script_ref, &prop_name, &value_ref, true)?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+            }
+        })
+    }
+
+    pub async fn set_obj_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id).to_owned();
+        let (value, obj_datum_ref) = reserve_player_mut(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let value = scope.stack.pop().unwrap();
+            let obj_datum_ref = scope.stack.pop().unwrap();
+            Ok((value, obj_datum_ref))
+        })?;
+        player_set_obj_prop(&obj_datum_ref, &prop_name, &value).await?;
+        Ok(HandlerExecutionResult::Advance)
+    }
+
+    pub fn get_obj_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id).to_owned();
+        reserve_player_mut(|player| {
+            // Pop the object reference from the stack
+            let obj_datum_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+
+            if let Datum::XmlRef(xml_id) = player.get_datum(&obj_datum_ref) {
+                let result_ref =
+                    crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
+                        player,
+                        &obj_datum_ref,
+                        &prop_name,
+                    )?;
+
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.push(result_ref);
+
+                return Ok(HandlerExecutionResult::Advance);
+            }
+
+            let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name)?;
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_movie_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let result_ref = player.get_movie_prop(prop_name)?;
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn set(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let property_id_ref = scope.stack.pop().unwrap();
+            let property_id = player.allocator.get_datum(&property_id_ref).int_value()?;
+            let value_ref = scope.stack.pop().unwrap();
+            let value = player.get_datum(&value_ref).clone();
+
+            let property_type = player.get_ctx_current_bytecode(ctx).obj;
+            match property_type {
+                0x00 => {
+                    if property_id <= 0x0b {
+                        // movie prop
+                        let prop_name = movie_prop_names().get(&(property_id as u16)).unwrap();
+                        GetSetUtils::set_the_built_in_prop(player, ctx, prop_name, value)?;
+                        Ok(HandlerExecutionResult::Advance)
+                    } else {
+                        // last chunk
+                        Err(ScriptError::new(format!(
+                            "Invalid propertyType/propertyID for kOpSet: {}",
+                            property_type
+                        )))
+                    }
+                }
+                0x04 => {
+                    // Sound channel properties
+                    let prop_name = get_sound_prop_name(property_id as u16);
+                    let channel_num_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&channel_num_ref).int_value()?;
+
+                    // Create a SoundChannel datum with the channel number
+                    let sound_channel_datum =
+                        player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+
+                    SoundChannelDatumHandlers::set_prop(
+                        player,
+                        &sound_channel_datum,
+                        &prop_name,
+                        &value_ref,
+                    )?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                0x06 => {
+                    let prop_name = get_sprite_prop_name(property_id as u16);
+                    let datum_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let sprite_num = player.get_datum(&datum_ref).int_value()?;
+                    sprite_set_prop(sprite_num as i16, prop_name, value)?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                0x07 => {
+                    let prop_name = get_anim_prop_name(property_id as u16);
+                    player.set_movie_prop(&prop_name, value)?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                0x0b => {
+                    // Sound channel property (the volume of sound X)
+                    let prop_name = get_sound_prop_name(property_id as u16);
+                    let channel_num_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&channel_num_ref).int_value()?;
+                    // Channel 0 means global/default - treat as channel 1
+                    let channel_num = if channel_num == 0 { 1 } else { channel_num };
+                    let sound_channel_datum =
+                        player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+                    SoundChannelDatumHandlers::set_prop(
+                        player,
+                        &sound_channel_datum,
+                        &prop_name,
+                        &value_ref,
+                    )?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                0x09 => {
+                    // Cast member property (kTheCast)
+                    // Stack has: [member_id, castLib(D5+), value(popped), prop_id(popped)]
+                    let cast_lib_datum = if player.movie.dir_version >= 500 {
+                        let r = {
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.pop().unwrap()
+                        };
+                        Some(player.get_datum(&r).clone())
+                    } else {
+                        None
+                    };
+                    let member_id_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let member_id_datum = player.get_datum(&member_id_ref).clone();
+                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                        &member_id_datum,
+                        cast_lib_datum.as_ref(),
+                        &player.allocator,
+                    )?;
+                    match member_ref {
+                        Some(member_ref) => {
+                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                        None => {
+                            warn!("set cast member prop '{}': member not found", prop_name);
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                    }
+                }
+                _ => Err(ScriptError::new(format!(
+                    "Invalid propertyType/propertyID for kOpSet: {}",
+                    property_type
+                ))),
+            }
+        })
+    }
+
+    pub fn get_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let value_ref = player
+                .globals
+                .get(prop_name)
+                .unwrap_or(&DatumRef::Void)
+                .clone();
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(value_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn set_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let value_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
+            player.globals.insert(prop_name.to_owned(), value_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_field(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let cast_id_ref = if player.movie.dir_version >= 500 {
+                let cast_id_ref = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                Some(cast_id_ref)
+            } else {
+                None
+            };
+            let field_name_or_num_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+            let cast_id = if let Some(cast_id_ref) = cast_id_ref {
+                player.get_datum(&cast_id_ref)
+            } else {
+                &Datum::Int(0)
+            };
+            let field_name_or_num = player.get_datum(&field_name_or_num_ref);
+
+            let field_value = player.movie.cast_manager.get_field_value_by_identifiers(
+                field_name_or_num,
+                Some(cast_id),
+                &player.allocator,
+            )?;
+            let result_id = player.alloc_datum(Datum::String(field_value));
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_id);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
+                / get_current_variable_multiplier(player, &ctx);
+            let handler = get_current_handler_def(player, &ctx);
+            let name_id = handler.local_name_ids[name_int as usize];
+
+            let scope = player.scopes.get(ctx.scope_ref).unwrap();
+            let value_ref = scope
+                .locals
+                .get(&name_id)
+                .unwrap_or(&DatumRef::Void)
+                .clone();
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(value_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
+                / get_current_variable_multiplier(player, &ctx);
+            let handler = get_current_handler_def(player, &ctx);
+            let name_id = handler.local_name_ids[name_int as usize];
+
+            let value_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.locals.insert(name_id, value_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let param_number = player.get_ctx_current_bytecode(ctx).obj as u32
+                / get_current_variable_multiplier(player, ctx);
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let result = scope
+                .args
+                .get(param_number as usize)
+                .unwrap_or(&DatumRef::Void)
+                .clone();
+            scope.stack.push(result);
+        });
+        Ok(HandlerExecutionResult::Advance)
+    }
+
+    pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
+                / get_current_variable_multiplier(player, ctx);
+            let (arg_count, arg_index, value_ref) = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let arg_count = scope.args.len();
+                let arg_index = bytecode_obj as usize;
+                let value_ref = scope.stack.pop().unwrap();
+                (arg_count, arg_index, value_ref)
+            };
+
+            // In Lingo, strings are value types and should be copied when assigned
+            // to prevent mutations from affecting the original variable
+            let value_ref = match player.get_datum(&value_ref) {
+                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
+                _ => value_ref,
+            };
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            if arg_index < scope.args.len() {
+                scope.args[arg_index] = value_ref;
+                Ok(HandlerExecutionResult::Advance)
+            } else {
+                scope.args.resize(arg_count.max(arg_index), DatumRef::Void);
+                scope.args.insert(arg_index, value_ref);
+                Ok(HandlerExecutionResult::Advance)
+            }
+        })
+    }
+
+    pub fn set_movie_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let value_ref = scope.stack.pop().unwrap();
+            let value = player.get_datum(&value_ref).clone();
+            player.set_movie_prop(prop_name, value)?;
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn the_built_in(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let result_id = GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)?;
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.pop(); // empty arglist
+            scope.stack.push(result_id);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_chained_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id).to_owned();
+        reserve_player_mut(|player| {
+            let obj_ref = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap_or(DatumRef::Void)
+            };
+
+            // Clone the datum type first
+            let obj_type = player.get_datum(&obj_ref).type_enum();
+
+            // Check if prop_name is a numeric index
+            let is_numeric_index = prop_name.parse::<i32>().is_ok();
+
+            let result_ref = match obj_type {
+                crate::director::lingo::datum::DatumType::SpriteRef => {
+                    // Handle sprite references
+                    let sprite_num = player.get_datum(&obj_ref).to_sprite_ref()?;
+
+                    // Try built-in sprite properties FIRST
+                    // This ensures properties like 'visible', 'loc', etc. work correctly
+                    match crate::player::score::sprite_get_prop(
+                        player,
+                        sprite_num as i16,
+                        &prop_name,
+                    ) {
+                        Ok(datum) => {
+                            let result = player
+                                .last_sprite_prop_ref
+                                .take()
+                                .unwrap_or_else(|| player.alloc_datum(datum));
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.push(result);
+                            return Ok(HandlerExecutionResult::Advance);
+                        }
+                        Err(_) => {
+                            // Not a built-in property, try script instances
+                            // Clone the script instance list to avoid borrow issues
+                            let instance_refs = {
+                                let sprite = player.movie.score.get_sprite(sprite_num);
+                                sprite
+                                    .map(|s| s.script_instance_list.clone())
+                                    .unwrap_or_default()
+                            };
+
+                            // Try to get the property from script instances
+                            for instance_ref in instance_refs {
+                                if let Ok(result) = crate::player::script::script_get_prop(
+                                    player,
+                                    &instance_ref,
+                                    &prop_name,
+                                ) {
+                                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                                    scope.stack.push(result);
+                                    return Ok(HandlerExecutionResult::Advance);
+                                }
+                            }
+
+                            // Property not found anywhere
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.push(DatumRef::Void);
+                            return Ok(HandlerExecutionResult::Advance);
+                        }
+                    }
+                }
+                crate::director::lingo::datum::DatumType::XmlRef => {
+                    crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
+                        player, &obj_ref, &prop_name,
+                    )?
+                }
+                crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {
+                    "length" => {
+                        let len = if let Datum::String(s) = player.get_datum(&obj_ref) {
+                            s.chars().count() as i32
+                        } else {
+                            unreachable!()
+                        };
+                        player.alloc_datum(Datum::Int(len))
+                    }
+                    "char" => {
+                        use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+                        let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref)
+                        {
+                            (s.chars().count() as i32, s.clone())
+                        } else {
+                            unreachable!()
+                        };
+                        let chunk_expr = StringChunkExpr {
+                            chunk_type: StringChunkType::Char,
+                            start: 1,
+                            end: s_len,
+                            item_delimiter: player.movie.item_delimiter,
+                        };
+                        player.alloc_datum(Datum::StringChunk(
+                            crate::director::lingo::datum::StringChunkSource::Datum(
+                                obj_ref.clone(),
+                            ),
+                            chunk_expr,
+                            s_clone,
+                        ))
+                    }
+                    _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+                },
+                crate::director::lingo::datum::DatumType::List => {
+                    // Handle numeric indices for lists
+                    if is_numeric_index {
+                        let index = prop_name.parse::<i32>().unwrap();
+                        if let Datum::List(_, list, _) = player.get_datum(&obj_ref) {
+                            // Lingo uses 1-based indexing
+                            let zero_based_index = (index - 1) as usize;
+                            if zero_based_index < list.len() {
+                                list[zero_based_index].clone()
+                            } else {
+                                return Err(ScriptError::new(format!(
+                                    "List index {} out of bounds (list has {} items)",
+                                    index,
+                                    list.len()
+                                )));
+                            }
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        // Route all property access to ListDatumHandlers
+                        ListDatumHandlers::get_prop(player, &obj_ref, &prop_name)?
+                    }
+                }
+                crate::director::lingo::datum::DatumType::PropList => {
+                    // Route all property access to get_obj_prop which handles PropList properly
+                    get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                }
+                crate::director::lingo::datum::DatumType::ScriptInstanceRef => {
+                    // If it's a numeric index, try to find a default indexable property
+                    if is_numeric_index {
+                        // Common indexable properties in Director scripts
+                        let indexable_property_names = vec!["aSquares", "list", "items", "data"];
+
+                        let mut found_indexable = None;
+                        for prop in indexable_property_names {
+                            if let Ok(prop_ref) = get_obj_prop(player, &obj_ref, &prop.to_string())
+                            {
+                                // Check if this property is a list
+                                if let Datum::List(_, _, _) = player.get_datum(&prop_ref) {
+                                    found_indexable = Some(prop_ref);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some(list_ref) = found_indexable {
+                            // Now index into the list
+                            let index = prop_name.parse::<i32>().unwrap();
+                            if let Datum::List(_, list, _) = player.get_datum(&list_ref) {
+                                // Lingo uses 1-based indexing
+                                let zero_based_index = (index - 1) as usize;
+                                if zero_based_index < list.len() {
+                                    list[zero_based_index].clone()
+                                } else {
+                                    return Err(ScriptError::new(format!(
+                                        "List index {} out of bounds (list has {} items)",
+                                        index,
+                                        list.len()
+                                    )));
+                                }
+                            } else {
+                                return Err(ScriptError::new(format!(
+                                    "Internal error: Property was a list but now isn't"
+                                )));
+                            }
+                        } else {
+                            return Err(ScriptError::new(format!(
+                                "Cannot use numeric index '{}' on script instance - no indexable property found (tried: aSquares, list, items, data)",
+                                prop_name
+                            )));
+                        }
+                    } else {
+                        // Regular property access
+                        get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                    }
+                }
+                _ => get_obj_prop(player, &obj_ref, &prop_name.to_owned())?,
+            };
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_ref);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let prop_id = {
+                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                scope.stack.pop().unwrap()
+            };
+            let prop_id = player.get_datum(&prop_id).int_value()?;
+            let prop_type = player.get_ctx_current_bytecode(ctx).obj;
+            let max_movie_prop_id = *movie_prop_names().keys().max().unwrap();
+
+            let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
+                // movie prop
+                let prop_name = movie_prop_names().get(&(prop_id as u16)).unwrap();
+                GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)
+            } else if prop_type == 0 {
+                // last chunk
+                let string_id = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                let string = player.get_datum(&string_id).string_value()?;
+                let chunk_type = StringChunkType::from(&(prop_id - 0x0b));
+                let last_chunk = StringChunkUtils::resolve_last_chunk(
+                    &string,
+                    chunk_type,
+                    player.movie.item_delimiter,
+                )?;
+
+                Ok(player.alloc_datum(Datum::String(last_chunk)))
+            } else if prop_type == 0x06 {
+                // sprite prop
+                let prop_name = sprite_prop_names().get(&(prop_id as u16));
+                if prop_name.is_some() {
+                    let datum_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let sprite_num = player.get_datum(&datum_ref).int_value()?;
+                    let result = sprite_get_prop(player, sprite_num as i16, prop_name.unwrap())?;
+                    Ok(player
+                        .last_sprite_prop_ref
+                        .take()
+                        .unwrap_or_else(|| player.alloc_datum(result)))
+                } else {
+                    Err(ScriptError::new(format!(
+                        "kOpGet sprite prop {} not implemented",
+                        prop_id
+                    )))
+                }
+            } else if prop_type == 0x07 {
+                // anim prop
+                Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))
+            } else if prop_type == 0x08 {
+                // anim2 prop
+                let datum = if prop_id == 0x02 && player.movie.dir_version >= 500 {
+                    // the number of castMembers supports castLib selection from Director 5.0
+                    let cast_lib_id = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let cast_lib_id = player.get_datum(&cast_lib_id);
+                    let bypass_castlib_selection =
+                        cast_lib_id.is_int() && cast_lib_id.int_value()? == 0;
+                    if bypass_castlib_selection {
+                        player.get_anim2_prop(prop_id as u16)?
+                    } else {
+                        let cast = {
+                            if cast_lib_id.is_string() {
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast_by_name(&cast_lib_id.string_value()?)
+                            } else {
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast_or_null(cast_lib_id.int_value()? as u32)
+                            }
+                        };
+                        match cast {
+                            Some(cast) => Datum::Int(cast.max_member_id() as i32),
+                            None => return Err(ScriptError::new(format!("kOpSet cast not found"))),
+                        }
+                    }
+                } else {
+                    player.get_anim2_prop(prop_id as u16)?
+                };
+                Ok(player.alloc_datum(datum))
+            } else if prop_type == 0x09 {
+                // Cast member property (kTheCast)
+                let cast_lib_datum = if player.movie.dir_version >= 500 {
+                    let r = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    Some(player.get_datum(&r).clone())
+                } else {
+                    None
+                };
+                let member_id_ref = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                let member_id_datum = player.get_datum(&member_id_ref).clone();
+                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                    &member_id_datum,
+                    cast_lib_datum.as_ref(),
+                    &player.allocator,
+                )?;
+                match member_ref {
+                    Some(member_ref) => {
+                        let result =
+                            CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        Ok(player.alloc_datum(result))
+                    }
+                    None => {
+                        warn!("get cast member prop '{}': member not found", prop_name);
+                        Ok(player.alloc_datum(Datum::Void))
+                    }
+                }
+            } else if prop_type == 0x0b {
+                // sound properties
+                if prop_id == 2 {
+                    // "the number of sounds" or similar global sound property
+                    // Pop the value from stack (typically 0 for global properties)
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap();
+
+                    // Return the number of active sounds/channels
+                    Ok(player.alloc_datum(Datum::Int(player.sound_manager.num_channels() as i32)))
+                } else {
+                    // Regular sound channel property access
+                    let prop_name = get_sound_prop_name(prop_id as u16);
+                    let datum_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&datum_ref).int_value()?;
+
+                    // Channel 0 means global/default - treat as channel 1
+                    let channel_num = if channel_num == 0 { 1 } else { channel_num };
+
+                    if channel_num < 0 {
+                        return Err(ScriptError::new(format!(
+                            "Sound channel index must be >= 1 for property '{}'",
+                            prop_name
+                        )));
+                    }
+
+                    let sound_channel_datum =
+                        player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+                    let result = SoundChannelDatumHandlers::get_prop(
+                        player,
+                        &sound_channel_datum,
+                        &prop_name,
+                    )?;
+                    Ok(player.alloc_datum(result))
+                }
+            } else if prop_type == 0x01 {
+                // number of chunks
+                let string_id = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                let string = player.get_datum(&string_id).string_value()?;
+                let chunk_type = StringChunkType::from(&prop_id);
+                let chunks = StringChunkUtils::resolve_chunk_list(
+                    &string,
+                    chunk_type,
+                    player.movie.item_delimiter,
+                )?;
+                Ok(player.alloc_datum(Datum::Int(chunks.len() as i32)))
+            } else {
+                Err(ScriptError::new(format!(
+                    "OpCode.kOpGet call not implemented propertyID={} propertyType={}",
+                    prop_id, prop_type
+                )))
+            }?;
+
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    pub fn get_top_level_prop(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }
+            .get_ctx_current_bytecode(ctx)
+            .obj as u16;
+        let prop_name = ctx.get_name(name_id);
+        reserve_player_mut(|player| {
+            let result = GetSetUtils::get_top_level_prop(player, prop_name)?;
+            let result_id = player.alloc_datum(result);
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_id);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+}

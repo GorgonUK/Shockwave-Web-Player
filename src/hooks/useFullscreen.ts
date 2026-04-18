@@ -18,7 +18,7 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>) {
     setSupported(
       Boolean(
         (el && (el.requestFullscreen || el.webkitRequestFullscreen)) ||
-          doc.documentElement?.requestFullscreen,
+        doc.documentElement?.requestFullscreen,
       ),
     );
 

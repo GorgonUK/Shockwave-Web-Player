@@ -1,0 +1,28 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install `wasm-pack`
+      working-directory: ./vm-rust
+      run: cargo install wasm-pack
+    - name: Fetch
+      working-directory: ./vm-rust
+      run: cargo fetch
+    - name: Test (Verbose)
+      working-directory: ./vm-rust
+      run: cargo test --verbose
+    - name: Build
+      working-directory: ./vm-rust
+      run: wasm-pack build --target web

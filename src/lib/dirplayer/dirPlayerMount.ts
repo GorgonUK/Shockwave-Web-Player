@@ -52,7 +52,7 @@ export async function mountDirPlayer(config: MountConfig): Promise<MountedInstan
 
   // Always build the host DOM, even if the runtime is missing — so the user
   // sees a polished placeholder explaining the situation, not a blank box.
-  const host = buildHost(config.container, config.stage);
+  const host = buildHost(config.container);
 
   if (loader.status !== 'ready') {
     renderPolyfillFallback(host, loader.status);
@@ -144,7 +144,7 @@ export async function mountDirPlayer(config: MountConfig): Promise<MountedInstan
 /* DOM helpers                                                         */
 /* ------------------------------------------------------------------ */
 
-function buildHost(container: HTMLElement, stage?: { width: number; height: number }): HTMLElement {
+function buildHost(container: HTMLElement): HTMLElement {
   // Wipe any previous content first to guarantee a clean slate.
   while (container.firstChild) container.removeChild(container.firstChild);
 
@@ -152,15 +152,13 @@ function buildHost(container: HTMLElement, stage?: { width: number; height: numb
   host.dataset.dirplayerHost = 'true';
   host.style.position = 'absolute';
   host.style.inset = '0';
-  host.style.display = 'flex';
-  host.style.alignItems = 'center';
-  host.style.justifyContent = 'center';
+  /** Block layout so the polyfill root can fill the host; flex centering kept a 640×480 stage in the middle and clicks on the black margin never reached #stage_canvas_container. */
+  host.style.display = 'block';
   host.style.background = '#000';
   host.style.overflow = 'hidden';
-
-  if (stage) {
-    host.style.aspectRatio = `${stage.width} / ${stage.height}`;
-  }
+  host.style.minHeight = '0';
+  // Do not set aspect-ratio here: PlayerViewport already constrains the mount box (4:3).
+  // A second aspect-ratio on this absolutely positioned host can collapse height in some layouts.
 
   container.appendChild(host);
   return host;

@@ -1,4 +1,7 @@
-import type { MovieUrlKind, ParsedDirPlayerScriptMessage } from '@/lib/dirplayer/runtimeDiagnostics';
+import type {
+  MovieUrlKind,
+  ParsedDirPlayerScriptMessage,
+} from '@/lib/dirplayer/runtimeDiagnostics';
 
 export type PlayerStatus =
   | { kind: 'idle' }

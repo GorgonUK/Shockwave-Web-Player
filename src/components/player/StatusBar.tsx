@@ -6,6 +6,7 @@ import type { BrowserEnv } from '@/lib/browser/env';
 import { describeBrowser } from '@/lib/browser/env';
 import type { PlayerStatus } from '@/types/player';
 import { LOADING_LABELS } from '@/types/player';
+import { DIRPLAYER_RUNTIME_SOURCE } from '@/lib/dirplayer/constants';
 
 interface StatusBarProps {
   polyfillStatus: PolyfillStatus;
@@ -15,7 +16,10 @@ interface StatusBarProps {
   playerStatus: PlayerStatus;
 }
 
-const TONE: Record<PolyfillStatus, 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info'> = {
+const TONE: Record<
+  PolyfillStatus,
+  'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info'
+> = {
   unknown: 'neutral',
   'not-loaded': 'neutral',
   loading: 'accent',
@@ -25,9 +29,10 @@ const TONE: Record<PolyfillStatus, 'neutral' | 'accent' | 'success' | 'warning' 
   error: 'danger',
 };
 
-function runtimeBadgeMeta(
-  status: PlayerStatus,
-): { label: string; tone: 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info' } {
+function runtimeBadgeMeta(status: PlayerStatus): {
+  label: string;
+  tone: 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info';
+} {
   switch (status.kind) {
     case 'idle':
       return { label: 'Runtime · idle', tone: 'neutral' };
@@ -51,13 +56,22 @@ function runtimeBadgeMeta(
   }
 }
 
-export function StatusBar({ polyfillStatus, runtimeKey, assets, env, playerStatus }: StatusBarProps) {
+export function StatusBar({
+  polyfillStatus,
+  runtimeKey,
+  assets,
+  env,
+  playerStatus,
+}: StatusBarProps) {
   const rt = runtimeBadgeMeta(playerStatus);
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-[14px] border border-[var(--color-border)] bg-[var(--color-surface)]/70 px-3 py-2 text-[11.5px]">
-      <Badge tone={TONE[polyfillStatus]} dot={polyfillStatus === 'loading' || polyfillStatus === 'ready'}>
-        Polyfill · {POLYFILL_STATUS_LABELS[polyfillStatus]}
+      <Badge
+        tone={TONE[polyfillStatus]}
+        dot={polyfillStatus === 'loading' || polyfillStatus === 'ready'}
+      >
+        Polyfill ({DIRPLAYER_RUNTIME_SOURCE}) · {POLYFILL_STATUS_LABELS[polyfillStatus]}
         {runtimeKey ? ` · window.${runtimeKey}` : ''}
       </Badge>
 

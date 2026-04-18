@@ -1,4 +1,8 @@
-import type { MovieUrlKind, ParsedDirPlayerScriptMessage } from '@/lib/dirplayer/runtimeDiagnostics';
+import type {
+  MovieUrlKind,
+  ParsedDirPlayerRuntimeTrace,
+  ParsedDirPlayerScriptMessage,
+} from '@/lib/dirplayer/runtimeDiagnostics';
 
 export interface DiagnosticsErrorEntry {
   id: string;
@@ -22,6 +26,17 @@ export interface RuntimeScriptEventEntry {
   occurrenceIndex?: number;
 }
 
+/** Rolling log of runtime debug traces emitted by the patched local bundle. */
+export interface RuntimeTraceEventEntry {
+  id: string;
+  at: number;
+  rawMessage: string;
+  parsed: ParsedDirPlayerRuntimeTrace;
+  movieFileName?: string;
+  movieUrlKind: MovieUrlKind;
+  source: 'debug-bridge';
+}
+
 export type PolyfillStatus =
   | 'unknown'
   | 'not-loaded'
@@ -34,9 +49,9 @@ export type PolyfillStatus =
 export const POLYFILL_STATUS_LABELS: Record<PolyfillStatus, string> = {
   unknown: 'Unknown',
   'not-loaded': 'Not loaded',
-  loading: 'Loading…',
+  loading: 'Loading...',
   ready: 'Ready',
   'script-missing': 'Script not found (404)',
-  'loaded-no-global': 'Loaded · awaiting global',
+  'loaded-no-global': 'Loaded / awaiting global',
   error: 'Failed to load',
 };

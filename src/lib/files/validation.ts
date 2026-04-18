@@ -6,9 +6,7 @@ export const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.join(',');
 /** 250 MB. Hard ceiling for the upload surface. */
 export const MAX_FILE_BYTES = 250 * 1024 * 1024;
 
-export type ValidationResult =
-  | { ok: true; kind: AssetKind }
-  | { ok: false; reason: string };
+export type ValidationResult = { ok: true; kind: AssetKind } | { ok: false; reason: string };
 
 export function getExtension(name: string): string {
   const dot = name.lastIndexOf('.');

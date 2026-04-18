@@ -1,21 +1,21 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { createId } from '@/lib/utils/ids';
-import type { DiagnosticsErrorEntry, RuntimeScriptEventEntry } from '@/types/diagnostics';
+import type {
+  DiagnosticsErrorEntry,
+  RuntimeScriptEventEntry,
+  RuntimeTraceEventEntry,
+} from '@/types/diagnostics';
 
 interface DiagnosticsContextValue {
   errors: DiagnosticsErrorEntry[];
   runtimeScriptEvents: RuntimeScriptEventEntry[];
+  runtimeTraceEvents: RuntimeTraceEventEntry[];
   recordError: (entry: Omit<DiagnosticsErrorEntry, 'id' | 'at'>) => void;
   recordRuntimeScriptEvent: (entry: Omit<RuntimeScriptEventEntry, 'id' | 'at'>) => void;
+  recordRuntimeTraceEvent: (entry: Omit<RuntimeTraceEventEntry, 'id' | 'at'>) => void;
   clearErrors: () => void;
   clearRuntimeScriptEvents: () => void;
+  clearRuntimeTraceEvents: () => void;
   clearAllDiagnostics: () => void;
 }
 
@@ -23,10 +23,12 @@ const DiagnosticsContext = createContext<DiagnosticsContextValue | null>(null);
 
 const MAX_ERRORS = 25;
 const MAX_RUNTIME = 40;
+const MAX_RUNTIME_TRACE = 60;
 
 export function DiagnosticsProvider({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<DiagnosticsErrorEntry[]>([]);
   const [runtimeScriptEvents, setRuntimeScriptEvents] = useState<RuntimeScriptEventEntry[]>([]);
+  const [runtimeTraceEvents, setRuntimeTraceEvents] = useState<RuntimeTraceEventEntry[]>([]);
 
   const recordError = useCallback((entry: Omit<DiagnosticsErrorEntry, 'id' | 'at'>) => {
     setErrors((prev) =>
@@ -60,30 +62,47 @@ export function DiagnosticsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const recordRuntimeTraceEvent = useCallback(
+    (entry: Omit<RuntimeTraceEventEntry, 'id' | 'at'>) => {
+      setRuntimeTraceEvents((prev) =>
+        [{ ...entry, id: createId('trace'), at: Date.now() }, ...prev].slice(0, MAX_RUNTIME_TRACE),
+      );
+    },
+    [],
+  );
+
   const clearErrors = useCallback(() => setErrors([]), []);
   const clearRuntimeScriptEvents = useCallback(() => setRuntimeScriptEvents([]), []);
+  const clearRuntimeTraceEvents = useCallback(() => setRuntimeTraceEvents([]), []);
   const clearAllDiagnostics = useCallback(() => {
     setErrors([]);
     setRuntimeScriptEvents([]);
+    setRuntimeTraceEvents([]);
   }, []);
 
   const value = useMemo(
     () => ({
       errors,
       runtimeScriptEvents,
+      runtimeTraceEvents,
       recordError,
       recordRuntimeScriptEvent,
+      recordRuntimeTraceEvent,
       clearErrors,
       clearRuntimeScriptEvents,
+      clearRuntimeTraceEvents,
       clearAllDiagnostics,
     }),
     [
       errors,
       runtimeScriptEvents,
+      runtimeTraceEvents,
       recordError,
       recordRuntimeScriptEvent,
+      recordRuntimeTraceEvent,
       clearErrors,
       clearRuntimeScriptEvents,
+      clearRuntimeTraceEvents,
       clearAllDiagnostics,
     ],
   );

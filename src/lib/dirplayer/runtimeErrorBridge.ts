@@ -6,10 +6,16 @@
  */
 
 export const DIRPLAYER_SCRIPT_ERROR_EVENT = 'shockwave-web-player:dirplayer-script-error';
+export const DIRPLAYER_DEBUG_MESSAGE_EVENT = 'shockwave-web-player:dirplayer-debug-message';
 
 export interface DirPlayerScriptErrorDetail {
   raw: string;
   source: 'alert';
+}
+
+export interface DirPlayerDebugMessageDetail {
+  message: string;
+  source: 'dirplayer-js-api';
 }
 
 let installed = false;

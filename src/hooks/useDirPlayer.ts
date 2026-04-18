@@ -13,27 +13,25 @@
  *   - custom fetch interceptor: rewrite requests for `sound.cct` to the blob URL
  *   - serve assets from a real path (e.g. /games/<slug>/sound.cct) at build-
  *     or run-time and use that as the basePath
- * For now we still surface the .cct in MountConfig + diagnostics so the bridge
- * layer has everything it needs once we wire one of those strategies.
+ * When both files use `blob:` URLs, [`ensureWasmSafeBlobSession`] registers the
+ * .dcr and optional .cct under the same `/__dirplayer-blob/<uuid>/` prefix so
+ * relative fetches like `sound.cct` resolve (same origin as the movie).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { mountDirPlayer } from '@/lib/dirplayer/dirPlayerMount';
-import {
-  ensurePolyfillLoaded,
-  getCachedLoaderResult,
-} from '@/lib/dirplayer/dirPlayerLoader';
-import {
-  DIRPLAYER_BLOB_PATH_PREFIX,
-  ensureWasmSafeDcrUrl,
-  revokeWasmSafeDcrUrl,
-} from '@/lib/dirplayer/wasmSafeMovieUrl';
+import { ensurePolyfillLoaded, getCachedLoaderResult } from '@/lib/dirplayer/dirPlayerLoader';
+import { ensureWasmSafeBlobSession, revokeWasmSafeBlobUrls } from '@/lib/dirplayer/wasmSafeMovieUrl';
+import { validateDirectorMovieMagic } from '@/lib/dirplayer/validateDirectorMovieMagic';
 import {
   classifyPlaybackIssue,
   inferMovieUrlKind,
+  parseDirPlayerRuntimeTraceMessage,
   parseDirPlayerScriptMessage,
 } from '@/lib/dirplayer/runtimeDiagnostics';
 import {
+  DIRPLAYER_DEBUG_MESSAGE_EVENT,
   DIRPLAYER_SCRIPT_ERROR_EVENT,
+  type DirPlayerDebugMessageDetail,
   type DirPlayerScriptErrorDetail,
 } from '@/lib/dirplayer/runtimeErrorBridge';
 import { findHandlersForMissingBuiltin } from '@/lib/dirplayer/compat/registry';
@@ -74,8 +72,8 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
   const [runtimeKey, setRuntimeKey] = useState<string | null>(null);
   const [lastEffectiveDcrUrl, setLastEffectiveDcrUrl] = useState<string | null>(null);
   const mountedRef = useRef<MountedInstance | null>(null);
-  /** Synthetic `http(s)` URL backed by Cache API — must revoke on teardown. */
-  const syntheticDcrUrlRef = useRef<string | null>(null);
+  /** Synthetic blob-session URLs (movie + optional cast) — revoke all on teardown. */
+  const syntheticBlobUrlsRef = useRef<string[] | null>(null);
   /** Context for DirPlayer script errors (set when dcr URL is resolved in load()). */
   const playbackContextRef = useRef<{
     movieFileName?: string;
@@ -108,9 +106,9 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
   }, [diagnostics]);
 
   const teardown = useCallback(async () => {
-    if (syntheticDcrUrlRef.current) {
-      await revokeWasmSafeDcrUrl(syntheticDcrUrlRef.current);
-      syntheticDcrUrlRef.current = null;
+    if (syntheticBlobUrlsRef.current?.length) {
+      await revokeWasmSafeBlobUrls(syntheticBlobUrlsRef.current);
+      syntheticBlobUrlsRef.current = null;
     }
     const inst = mountedRef.current;
     mountedRef.current = null;
@@ -162,8 +160,26 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
 
       setStatus({ kind: 'loading', step: 'mounting-movie' });
 
-      const dcrUrl = await ensureWasmSafeDcrUrl(assets.movie.file, assets.movie.objectUrl);
-      syntheticDcrUrlRef.current = dcrUrl.includes(DIRPLAYER_BLOB_PATH_PREFIX) ? dcrUrl : null;
+      const magic = await validateDirectorMovieMagic(assets.movie.file);
+      if (!magic.ok) {
+        setStatus({ kind: 'error', message: magic.message, phase: 'load' });
+        onError?.(magic.message);
+        return;
+      }
+
+      const session = await ensureWasmSafeBlobSession({
+        movie: { file: assets.movie.file, objectUrl: assets.movie.objectUrl },
+        cast: assets.cast
+          ? {
+              file: assets.cast.file,
+              objectUrl: assets.cast.objectUrl,
+              name: assets.cast.name,
+            }
+          : null,
+      });
+      const dcrUrl = session.movieHttpUrl;
+      syntheticBlobUrlsRef.current =
+        session.cachedHttpUrls.length > 0 ? session.cachedHttpUrls : null;
       const urlKind = inferMovieUrlKind(dcrUrl);
       playbackContextRef.current = {
         movieFileName: assets.movie.name,
@@ -302,6 +318,38 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
     return () => window.removeEventListener(DIRPLAYER_SCRIPT_ERROR_EVENT, onScript);
   }, [assets.movie?.name, diagnostics, onError]);
 
+  useEffect(() => {
+    const onDebugMessage = (ev: Event) => {
+      const ce = ev as CustomEvent<DirPlayerDebugMessageDetail>;
+      const raw = ce.detail?.message ?? '';
+      const parsed = parseDirPlayerRuntimeTraceMessage(raw);
+      if (!parsed) return;
+
+      const ctx = playbackContextRef.current;
+      const movieUrlKind = ctx?.movieUrlKind ?? 'unknown';
+      const movieFileName = ctx?.movieFileName ?? assets.movie?.name;
+
+      // eslint-disable-next-line no-console
+      console.info('[Shockwave Web Player][DirPlayer runtime]', {
+        raw,
+        parsed,
+        movieFileName,
+        movieUrlKind,
+      });
+
+      diagnostics.recordRuntimeTraceEvent({
+        rawMessage: raw,
+        parsed,
+        movieFileName,
+        movieUrlKind,
+        source: 'debug-bridge',
+      });
+    };
+
+    window.addEventListener(DIRPLAYER_DEBUG_MESSAGE_EVENT, onDebugMessage);
+    return () => window.removeEventListener(DIRPLAYER_DEBUG_MESSAGE_EVENT, onDebugMessage);
+  }, [assets.movie?.name, diagnostics]);
+
   const refreshPolyfill = useCallback(async () => {
     setPolyfillStatus('loading');
     try {
@@ -341,7 +389,9 @@ export function useDirPlayer(opts: UseDirPlayerOptions): UseDirPlayerReturn {
   };
 }
 
-function loaderToStatus(s: 'ready' | 'script-missing' | 'loaded-no-global' | 'error'): PolyfillStatus {
+function loaderToStatus(
+  s: 'ready' | 'script-missing' | 'loaded-no-global' | 'error',
+): PolyfillStatus {
   switch (s) {
     case 'ready':
       return 'ready';

@@ -38,7 +38,10 @@ export function detectEnv(): BrowserEnv {
   }
 
   const ua = navigator.userAgent;
-  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform ?? '';
+  const platform =
+    (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ??
+    navigator.platform ??
+    '';
 
   const isIPhone = /iPhone/i.test(ua);
   // iPadOS reports as Mac; detect via touch + Mac-like platform.
@@ -80,12 +83,15 @@ export function detectEnv(): BrowserEnv {
 /** Compact human-readable description for the status bar. */
 export function describeBrowser(env: BrowserEnv): string {
   if (!env.isBrowser) return 'Server';
-  const platform =
-    env.isIPhone ? 'iPhone'
-    : env.isIPad ? 'iPad'
-    : env.isIOS ? 'iOS'
-    : env.isMobile ? 'Mobile'
-    : 'Desktop';
+  const platform = env.isIPhone
+    ? 'iPhone'
+    : env.isIPad
+      ? 'iPad'
+      : env.isIOS
+        ? 'iOS'
+        : env.isMobile
+          ? 'Mobile'
+          : 'Desktop';
   const browser = env.isSafari ? 'Safari' : guessBrowserName(env.userAgent);
   return `${platform} · ${browser}`;
 }

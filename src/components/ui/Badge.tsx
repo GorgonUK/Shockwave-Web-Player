@@ -10,8 +10,7 @@ export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 const TONES: Record<Tone, string> = {
-  neutral:
-    'bg-white/[0.04] text-[var(--color-fg-muted)] border border-[var(--color-border)]',
+  neutral: 'bg-white/[0.04] text-[var(--color-fg-muted)] border border-[var(--color-border)]',
   accent:
     'bg-[var(--color-accent-500)]/12 text-[var(--color-accent-300)] border border-[var(--color-accent-500)]/30',
   success:
@@ -32,14 +31,7 @@ const DOT_COLORS: Record<Tone, string> = {
   info: 'bg-[var(--color-cyan-400)]',
 };
 
-export function Badge({
-  tone = 'neutral',
-  dot,
-  icon,
-  className,
-  children,
-  ...rest
-}: BadgeProps) {
+export function Badge({ tone = 'neutral', dot, icon, className, children, ...rest }: BadgeProps) {
   return (
     <span
       className={cn(
